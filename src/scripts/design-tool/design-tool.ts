@@ -1,11 +1,12 @@
 import * as d3 from "d3";
-import * as konva from "konva";
+import Konva from "konva";
 import { useDesignToolStore } from "@/store/useDesignTool";
 
 export default class DesignTool {
-  private container: HTMLElement;
+  private container: HTMLDivElement;
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null =
     null;
+  private stage: Konva.Stage | null = null;
   private width: number = 0;
   private height: number = 0;
   private margin = { top: 20, right: 20, bottom: 20, left: 20 };
@@ -15,6 +16,8 @@ export default class DesignTool {
   private yScale: d3.ScaleLinear<number, number> | null = null;
   private zoom: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
   private transform = d3.zoomIdentity;
+  private axisLayer: Konva.Layer | null = null;
+  private drawingLayer: Konva.Layer | null = null;
 
   private axisGroup: d3.Selection<
     SVGGElement,
@@ -34,19 +37,44 @@ export default class DesignTool {
 
   // Store实例
   private store = useDesignToolStore();
+  private startDrawing: boolean = false;
 
-  constructor(container: HTMLElement) {
+  private drawingMode:
+    | "DRAG"
+    | "BATCHSELECT"
+    | "LINE"
+    | "CIRCLE"
+    | "POINT"
+    | "TRANGLE"
+    | "RECTANGLE"
+    | "";
+  private startX: number = 0;
+  private startY: number = 0;
+  private currentLayer: Konva.Layer | null = null;
+
+  constructor(container: HTMLDivElement) {
     this.container = container;
     this.init();
   }
 
   private init() {
-    this.setupDimensions();
-    this.createSVG();
-    this.setupScales();
-    this.drawAxis();
-    this.setupZoom();
-    this.setupResizeObserver();
+    this.setupDimensions(); // 设置尺寸
+    this.createKonva(); // 创建Konva
+    this.createAxisLayer();
+    this.createDrawingLayer();
+    this.createSVG(); // 创建SVG
+    this.setupScales(); // 设置比例尺
+    this.drawAxis(); // 绘制坐标轴
+    this.setupZoom(); // 设置缩放
+    this.updateKonvaAxisLines(); // 初始化konva坐标轴线位置
+    this.setupResizeObserver(); // 设置尺寸监听器
+  }
+
+  private getRandomId() {
+    return (
+      Math.random().toString(36).substring(2, 15) +
+      Math.random().toString(36).substring(2, 15)
+    );
   }
 
   private setupDimensions() {
@@ -62,7 +90,10 @@ export default class DesignTool {
       .attr("width", this.width)
       .attr("height", this.height)
       .style("background-color", "#fff")
-      .style("cursor", "grab");
+      .style("cursor", "grab")
+      .style("position", "absolute")
+      .style("top", "0")
+      .style("left", "0");
     // 坐标轴组（固定位置，不跟随缩放平移）
     this.axisGroup = this.svg.append("g").attr("class", "axis");
   }
@@ -264,16 +295,15 @@ export default class DesignTool {
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([1 / 3, 5]) // 缩小到1/3，放大到3倍
       .filter((event) => {
-        // 在绘图模式下，只允许缩放（滚轮事件），禁用拖拽（鼠标拖拽事件）
-        // if (this.store.isDrawingTool) {
-        //   // 允许滚轮缩放，但禁用鼠标拖拽
-        //   return event.type === 'wheel';
-        // }
+        // 禁用d3的滚轮缩放，因为我们使用konva的滚轮事件
+        if (event.type === "wheel") {
+          return false;
+        }
 
-        // 如果正在拖拽图形元素或控制点，禁用坐标系的拖拽，但允许缩放
-        // if (this.isDraggingElement || this.isDraggingHandle) {
-        //   return event.type === 'wheel';
-        // }
+        // 禁用d3的拖拽，因为我们使用konva的拖拽
+        if (event.type === "mousedown" || event.type === "touchstart") {
+          return false;
+        }
 
         return true;
       })
@@ -288,19 +318,37 @@ export default class DesignTool {
   private updateOnZoom() {
     // 重新绘制坐标轴（需要根据新的缩放级别调整）
     this.drawAxis();
+
+    // 更新konva坐标轴线位置
+    this.updateKonvaAxisLines();
   }
 
-    // 复位到初始状态（带动画）
-    public resetToInitial() {
-      if (!this.svg || !this.zoom) return;
-  
-      this.svg
-        .transition()
-        .duration(600) // 600ms 动画时长
-        .ease(d3.easeQuadInOut) // 平滑缓动
-        .call(this.zoom.transform, d3.zoomIdentity);
-    }
-  
+  // 复位到初始状态（带动画）
+  public resetToInitial() {
+    if (!this.svg || !this.zoom || !this.stage) return;
+
+    // 重置d3变换
+    this.transform = d3.zoomIdentity;
+    this.svg
+      .transition()
+      .duration(600) // 600ms 动画时长
+      .ease(d3.easeQuadInOut) // 平滑缓动
+      .call(this.zoom.transform, d3.zoomIdentity);
+
+    // 同时重置konva stage的变换（带动画）
+    this.stage.to({
+      x: 0,
+      y: 0,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 0.6, // 与d3动画时长保持一致
+      easing: Konva.Easings.EaseInOut,
+      onUpdate: () => {
+        // 在动画过程中更新坐标轴线
+        this.updateKonvaAxisLines();
+      },
+    });
+  }
 
   private setupResizeObserver() {
     // 检查浏览器是否支持 ResizeObserver
@@ -337,6 +385,17 @@ export default class DesignTool {
     // 更新 SVG 尺寸
     this.svg.attr("width", this.width).attr("height", this.height);
 
+    // 更新 Konva 舞台尺寸和位置
+    if (this.stage) {
+      this.stage.width(this.width - this.margin.left - this.margin.right);
+      this.stage.height(this.height - this.margin.top - this.margin.bottom);
+      const ele = this.stage.content as HTMLDivElement;
+      ele.style.position = "absolute";
+      ele.style.left = `${this.margin.left}px`;
+      ele.style.top = `${this.margin.top}px`;
+      ele.style.zIndex = "1";
+    }
+
     // 重新计算比例尺
     this.setupScales();
 
@@ -348,5 +407,246 @@ export default class DesignTool {
 
     // 重绘坐标轴和零点线
     this.drawAxis();
+
+    // 更新konva坐标轴线位置
+    this.updateKonvaAxisLines();
+  }
+
+  private getCurrentLayer(): Konva.Layer {
+    const layer = this.store.userElements.get(this.store.curLayerId);
+    if (layer) {
+      return layer;
+    } else {
+      const layer = new Konva.Layer({ id: this.getRandomId() });
+      this.store.userElements.set(this.store.curLayerId, layer);
+      return layer;
+    }
+  }
+
+  private transformToKonvaPosition(x: number, y: number) {
+    return {
+      x: (x - this.margin.left - this.stage!.position().x) / this.transform.k,
+      y: (y - this.margin.top - this.stage!.position().y) / this.transform.k,
+    };
+  }
+
+  private createKonva() {
+    this.stage = new Konva.Stage({
+      container: this.container,
+      width: this.width - this.margin.left - this.margin.right,
+      height: this.height - this.margin.top - this.margin.bottom,
+      draggable: true,
+    });
+
+    // 鼠标事件
+    this.stage.on("mousedown", () => {
+      if (this.store.toolType === "select") {
+        this.stage?.setAttr("draggable", true);
+      } else {
+        this.stage?.setAttr("draggable", false);
+        this.startDrawing = true;
+        switch (this.store.toolType) {
+          case "line":
+            this.startX = this.stage!.position().x;
+            this.startY = this.stage!.position().y;
+            this.currentLayer = this.getCurrentLayer();
+            const id = this.getRandomId();
+            const line = new Konva.Line({
+              points: [this.startX, this.startY, this.startX, this.startY],
+              strokeWidth: 1,
+              stroke: "black",
+              name: "line",
+              id,
+            });
+            this.store.selectedElement = line;
+            this.currentLayer.add(line);
+            break;
+        }
+      }
+    });
+
+    this.stage.on("mousemove", (e) => {
+      if (!this.startDrawing) {
+        return;
+      }
+      if (this.store.toolType === "line") {
+        this.store.selectedElement.points([
+          this.startX,
+          this.startY,
+          this.transformToKonvaPosition(e.evt.clientX, e.evt.clientY).x,
+          this.transformToKonvaPosition(e.evt.clientX, e.evt.clientY).y,
+        ]);
+      }
+    });
+    this.stage.on("mouseup", () => {
+      this.startDrawing = false;
+    });
+
+    // 拖拽事件
+    this.stage.on("dragstart", () => {
+      this.stage!.container().style.cursor = "grabbing";
+    });
+    this.stage.on("dragmove", () => {
+      // 获取stage的当前位置
+      const stagePos = this.stage!.position();
+
+      // 创建新的d3 transform，保持当前的缩放级别，只更新平移
+      // konva的position直接对应d3的translate
+      const newTransform = d3.zoomIdentity
+        .translate(stagePos.x, stagePos.y)
+        .scale(this.transform.k);
+
+      // 更新内部transform状态
+      this.transform = newTransform;
+
+      // 同步到d3的缩放系统（避免触发zoom事件的无限循环）
+      this.svg!.call(this.zoom!.transform, newTransform);
+
+      // 更新konva坐标轴线位置
+      this.updateKonvaAxisLines();
+    });
+    this.stage.on("dragend", () => {
+      this.stage!.container().style.cursor = "unset";
+    });
+
+    // 添加滚轮缩放事件
+    this.stage.on("wheel", (e) => {
+      e.evt.preventDefault(); // 阻止页面滚动
+
+      const scaleBy = 1.1; // 缩放倍数
+      const stage = this.stage!;
+      const pointer = stage.getPointerPosition()!;
+
+      // 计算新的缩放级别
+      const oldScale = this.transform.k;
+      const newScale =
+        e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
+
+      // 限制缩放范围，与d3的scaleExtent保持一致
+      const clampedScale = Math.max(1 / 3, Math.min(5, newScale));
+
+      if (clampedScale === oldScale) return; // 如果缩放没有变化，直接返回
+
+      // 计算缩放中心点（相对于stage的位置）
+      const stagePos = stage.position();
+      const centerX = (pointer.x - stagePos.x) / oldScale;
+      const centerY = (pointer.y - stagePos.y) / oldScale;
+
+      // 计算新的位置，使缩放以鼠标位置为中心
+      const newX = pointer.x - centerX * clampedScale;
+      const newY = pointer.y - centerY * clampedScale;
+
+      // 创建新的d3 transform
+      const newTransform = d3.zoomIdentity
+        .translate(newX, newY)
+        .scale(clampedScale);
+
+      // 更新内部transform状态
+      this.transform = newTransform;
+
+      // 同步到d3的缩放系统
+      this.svg!.call(this.zoom!.transform, newTransform);
+
+      // 同步konva stage的变换
+      stage.scale({ x: clampedScale, y: clampedScale });
+      stage.position({ x: newX, y: newY });
+
+      // 更新konva坐标轴线位置
+      this.updateKonvaAxisLines();
+    });
+
+    const ele = this.stage.content as HTMLDivElement;
+    ele.style.position = "absolute";
+    ele.style.zIndex = "1";
+    ele.style.left = `${this.margin.left}px`;
+    ele.style.top = `${this.margin.top}px`;
+  }
+
+  private createAxisLayer() {
+    this.axisLayer = new Konva.Layer();
+    this.stage!.add(this.axisLayer);
+
+    // 创建坐标轴线，初始位置在中心
+    const ele = this.stage!.content as HTMLDivElement;
+    const { width, height } = ele.getBoundingClientRect();
+
+    const xAxis = new Konva.Line({
+      points: [-10000, height / 2, width + 10000, height / 2],
+      strokeWidth: 1,
+      stroke: "#ccc",
+      dash: [3],
+      name: "x-axis-line", // 添加名称用于后续查找
+    });
+    this.axisLayer!.add(xAxis);
+
+    const yAxis = new Konva.Line({
+      points: [width / 2, -10000, width / 2, height + 10000],
+      strokeWidth: 1,
+      stroke: "#ccc",
+      dash: [3],
+      name: "y-axis-line", // 添加名称用于后续查找
+    });
+    this.axisLayer!.add(yAxis);
+  }
+
+  private createDrawingLayer() {
+    this.drawingLayer = new Konva.Layer();
+    this.stage!.add(this.drawingLayer);
+  }
+
+  // 更新konva坐标轴线位置，使其与d3坐标轴的0点对齐
+  private updateKonvaAxisLines() {
+    if (!this.axisLayer || !this.xScale || !this.yScale || !this.stage) return;
+
+    // 获取当前变换后的比例尺
+    const currentXScale = this.transform.rescaleX(this.xScale);
+    const currentYScale = this.transform.rescaleY(this.yScale);
+
+    // 计算0点在d3坐标系中的位置
+    const zeroXInD3 = currentXScale(0); // d3坐标系中x=0的像素位置
+    const zeroYInD3 = currentYScale(0); // d3坐标系中y=0的像素位置
+
+    // 转换到konva的本地坐标系
+    // 需要减去margin偏移，然后再减去stage的当前位置，因为坐标轴线是在stage内部
+    const stagePos = this.stage.position();
+    const zeroXInKonva =
+      (zeroXInD3 - this.margin.left - stagePos.x) / this.transform.k;
+    const zeroYInKonva =
+      (zeroYInD3 - this.margin.top - stagePos.y) / this.transform.k;
+
+    // 获取konva画布尺寸（相对于stage的本地坐标系）
+    const konvaWidth =
+      (this.width - this.margin.left - this.margin.right) / this.transform.k;
+    const konvaHeight =
+      (this.height - this.margin.top - this.margin.bottom) / this.transform.k;
+
+    // 更新X轴线（水平线）
+    const xAxisLine = this.axisLayer.findOne(
+      (node: any) => node.name() === "x-axis-line"
+    ) as Konva.Line;
+    if (xAxisLine) {
+      xAxisLine.points([
+        -10000 / this.transform.k,
+        zeroYInKonva,
+        (konvaWidth + 10000) / this.transform.k,
+        zeroYInKonva,
+      ]);
+    }
+
+    // 更新Y轴线（垂直线）
+    const yAxisLine = this.axisLayer.findOne(
+      (node: any) => node.name() === "y-axis-line"
+    ) as Konva.Line;
+    if (yAxisLine) {
+      yAxisLine.points([
+        zeroXInKonva,
+        -10000 / this.transform.k,
+        zeroXInKonva,
+        (konvaHeight + 10000) / this.transform.k,
+      ]);
+    }
+
+    // 重绘图层
+    this.axisLayer.batchDraw();
   }
 }

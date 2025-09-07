@@ -1,36 +1,29 @@
-import { defineStore } from 'pinia'
+import { defineStore } from "pinia";
 
 interface DesignToolState {
-  userElements: {
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    [key: string]: any;
-  }[];
+  userElements: Map<string, any>;
   selectedIds: string[]; // 框选元素的id（框选，多选，批量操作）
+  holeType: string; // 孔类型
+  holeLevel: number; // 孔层级
   toolType: string; // 工具类型, 选择，删除，拖拽移动，矩形，圆形，直线，点，三角形
-  selectedElement: {
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    [key: string]: any;
-  } | null; // 选中元素（点击单选）
+  selectedElement: any; // 选中元素（点击单选）
+  history: any[]; // 历史记录
 }
 
-
-export const useDesignToolStore = defineStore('designTool', {
+export const useDesignToolStore = defineStore("designTool", {
   state: (): DesignToolState => ({
-    userElements: [],
+    userElements: new Map(),
     selectedIds: [],
-    toolType: 'select',
-    selectedElement: null
+    holeType: "peripheralhole",
+    holeLevel: 1,
+    toolType: "select",
+    selectedElement: null,
+    history: [],
   }),
-  actions: {
-    addElement(element: any) {
-      this.userElements.push(element);
-    }
+  getters: {
+    curLayerId: (state: DesignToolState) =>
+      `${state.holeType}-${state.holeLevel}`,
   },
-  persist: true
-})
+  actions: {},
+  persist: true,
+});
